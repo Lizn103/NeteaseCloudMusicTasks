@@ -155,10 +155,11 @@ class NetEase(object):
         return data
 
     # 每日签到
-    def daily_task(self, type=0):
+    # type=1 为 PC/Web 端签到，网易云已关闭安卓端(type=0)签到接口，返回"功能暂不支持"
+    def daily_task(self, type=1):
         path = "/weapi/point/dailyTask"
         params = dict(type=type)
-        return self.request("POST", path, params, custom_cookies={'os': 'android'})
+        return self.request("POST", path, params)
 
     # 用户歌单
     def user_playlist(self, uid, offset=0, limit=50, includeVideo=True):
