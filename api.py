@@ -2,9 +2,10 @@
 import platform
 import json
 import os
+import time
 import requests
 from http.cookiejar import Cookie, LWPCookieJar
-from encrypt import encrypted_request
+from encrypt import encrypted_request, eapi_encrypt, eapi_decrypt
 import random
 from hashlib import md5
 
@@ -160,6 +161,78 @@ class NetEase(object):
         path = "/weapi/point/dailyTask"
         params = dict(type=type)
         return self.request("POST", path, params)
+
+    # 新版 eapi 请求 (网易云 2025+ 移动端接口), 参考 https://github.com/3899/ncmm
+    def request_eapi(self, path, params={}, host="https://interface3.music.163.com"):
+        endpoint = host + "/eapi" + path
+        csrf_token = ""
+        music_u = ""
+        for cookie in self.session.cookies:
+            if cookie.name == "__csrf":
+                csrf_token = cookie.value
+            if cookie.name == "MUSIC_U":
+                music_u = cookie.value
+        header = {
+            "osver": "",
+            "deviceId": "",
+            "appver": "8.10.10",
+            "versioncode": "140",
+            "mobilename": "",
+            "buildver": str(int(time.time())),
+            "resolution": "1920x1080",
+            "__csrf": csrf_token,
+            "os": "android",
+            "channel": "",
+            "requestId": "{}_{:04d}".format(
+                int(time.time() * 1000), random.randint(0, 9999)),
+        }
+        if music_u:
+            header["MUSIC_U"] = music_u
+        params = dict(params)
+        params["header"] = json.dumps(header)
+        data = eapi_encrypt(path, params)
+        try:
+            resp = self._raw_request("POST", endpoint, data)
+            raw = resp.content
+            decrypted = eapi_decrypt(raw)
+            return json.loads(decrypted)
+        except requests.exceptions.RequestException as e:
+            print(e)
+            return {"code": -1}
+        except ValueError as e:
+            print("Path: {}, response: {}".format(path, resp.text[:200]))
+            return {"code": -1}
+
+    # 红心歌曲 (添加到"我喜欢的音乐")
+    def song_like(self, song_id, user_id):
+        path = "/api/song/like"
+        params = dict(trackId=str(song_id), userid=str(user_id), like=True)
+        return self.request_eapi(path, params, host="https://interface.music.163.com")
+
+    # 云贝任务点击上报 (浏览会员中心等)
+    def yunbei_click_task(self, task_id, sub_action="", type_="", check_token=""):
+        path = "/api/yunbei/click/task"
+        params = dict(taskId=task_id, subAction=sub_action,
+                      type=type_, checkToken=check_token)
+        return self.request_eapi(path, params)
+
+    # 上报听歌打卡 (探索小众歌曲)
+    def trialsong_listen(self, song_id, album_id, scene=1):
+        path = "/api/vipmall/interest/trialsong/listen"
+        params = dict(songId=str(song_id), albumId=str(album_id), scene=scene)
+        return self.request_eapi(path, params)
+
+    # 探索小众歌曲推荐列表
+    def yunbei_distribution_recommend_song(self, offset=0, limit=10):
+        path = "/api/ad/power/yunbei/distribution/recommend/song"
+        params = dict(offset=offset, limit=limit)
+        return self.request_eapi(path, params)
+
+    # 探索小众歌曲听歌完成申请云贝分配凭证
+    def yunbei_distribution_create(self, amount=150):
+        path = "/api/ad/power/yunbei/distribution/create"
+        params = dict(yunbeiAmount=amount)
+        return self.request_eapi(path, params)
 
     # 用户歌单
     def user_playlist(self, uid, offset=0, limit=50, includeVideo=True):

@@ -8,7 +8,9 @@ import sys
 
 from Cryptodome.Cipher import AES
 
-__all__ = ["encrypted_id", "encrypted_request"]
+__all__ = ["encrypted_id", "encrypted_request", "eapi_encrypt", "eapi_decrypt"]
+
+EAPI_SECRET = b"e82ckenh8dichen8"
 
 MODULUS = (
     "00e0b509f6259df8642dbc35662901477df22677ec152b5ff68ace615bb7"
@@ -61,3 +63,24 @@ def rsa(text, pubkey, modulus):
 
 def create_key(size):
     return binascii.hexlify(os.urandom(size))[:16]
+
+
+# 新版 eapi 加密算法 (网易云 2025+), 参考 https://github.com/3899/ncmm
+def eapi_encrypt(path, data):
+    # type: (str, dict) -> dict
+    text = json.dumps(data, ensure_ascii=False, separators=(",", ":"))
+    encrypt_message = "nobody{}use{}md5forencrypt".format(path, text)
+    digest = hashlib.md5(encrypt_message.encode("utf-8")).hexdigest()
+    request_data = "{}-36cd479b6b5-{}-36cd479b6b5-{}".format(path, text, digest)
+    raw = request_data.encode("utf-8")
+    pad = 16 - len(raw) % 16
+    raw += bytes([pad]) * pad
+    params = AES.new(EAPI_SECRET, AES.MODE_ECB).encrypt(raw).hex().upper()
+    return {"params": params}
+
+
+def eapi_decrypt(data):
+    # type: (bytes) -> bytes
+    if data[:2] == b'{"':
+        return data
+    return AES.new(EAPI_SECRET, AES.MODE_ECB).decrypt(data)
