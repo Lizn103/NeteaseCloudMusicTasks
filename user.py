@@ -716,6 +716,14 @@ class User(object):
     def vip_task(self):
         self.taskTitle('VIP成长值')
 
+        # 黑胶乐签 (每日 VIP 成长值签到)
+        sign_resp = self.music.vip_sign()
+        if sign_resp['code'] == 200:
+            self.taskInfo('黑胶乐签', '签到成功')
+        else:
+            self.taskInfo('黑胶乐签', self.errMsg(sign_resp))
+        time.sleep(2)
+
         resp = self.music.vip_task_newlist()
         items = []
         tasks = self.user_setting["vip_task"]

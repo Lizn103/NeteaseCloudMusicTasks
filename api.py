@@ -457,6 +457,11 @@ class NetEase(object):
         return self.request("POST", path, params)
 
     # vip level
+    # 黑胶 VIP 乐签 (每日 VIP 成长值签到)
+    def vip_sign(self):
+        path = "/weapi/vip-center-bff/task/sign"
+        return self.request("POST", path, {'isNew': ''})
+
     def vip_level(self):
         path = "/weapi/music-vip-membership/client/vip/info"
         return self.request("POST", path)

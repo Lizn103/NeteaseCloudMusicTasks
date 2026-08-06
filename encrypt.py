@@ -83,4 +83,8 @@ def eapi_decrypt(data):
     # type: (bytes) -> bytes
     if data[:2] == b'{"':
         return data
-    return AES.new(EAPI_SECRET, AES.MODE_ECB).decrypt(data)
+    out = AES.new(EAPI_SECRET, AES.MODE_ECB).decrypt(data)
+    pad = out[-1]
+    if 1 <= pad <= 16:
+        out = out[:-pad]
+    return out
