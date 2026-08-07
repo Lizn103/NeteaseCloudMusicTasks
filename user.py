@@ -3,6 +3,7 @@ import time
 import random
 import math
 import re
+import json
 from api import NetEase
 import os
 import requests
@@ -800,28 +801,113 @@ class User(object):
         self._unlike_vip_songs()
         self.finishTask()
 
-    # 黑胶每日附加任务 (EAPI task/list, 参考 ncmm executeSingleVipTask)
+    # 黑胶每日附加任务 (EAPI task/list + 成长中心 progress/list 合并, 参考 ncmm)
     def vip_daily_tasks(self):
         resp = self.music.vip_task_list(getattr(self, 'cookie', ''))
         if resp.get('code') != 200:
             self.taskInfo('黑胶每日任务', '获取任务列表失败')
             return
-        for t in resp.get('data', []):
+        tasks = resp.get('data', [])
+        prog = self.music.vip_progress_list()
+        if prog.get('code') == 200:
+            seen = set(t.get('missionCode') for t in tasks if t.get('missionCode'))
+            for m in prog.get('data') or []:
+                bm = m.get('basicMissionDTO') or {}
+                code = bm.get('missionCode') or ''
+                if not code or code in seen:
+                    continue
+                seen.add(code)
+                jump_url = ''
+                sc = bm.get('schemaContent')
+                if isinstance(sc, str) and sc:
+                    try:
+                        jump_url = (json.loads(sc).get('jumpUrl') or '')
+                    except Exception:
+                        pass
+                stage = m.get('stageProgressDTOS') or [{}]
+                tasks.append({
+                    'missionCode': code,
+                    'missionId': bm.get('missionId'),
+                    'mainTitle': bm.get('name') or '',
+                    'status': m.get('missionStatus'),
+                    'worth': stage[0].get('worth', 0) if stage else 0,
+                    'jumpUrl': jump_url,
+                })
+        for t in tasks:
             title = t.get('mainTitle') or ''
             status = t.get('status')
             code = t.get('missionCode') or ''
-            if status != 10:
+            if status == 100:
                 continue
             if code == 'HXSSG' or '红心3首' in title:
                 self.vip_like_three()
             elif code == 'FLQ' or '领福利' in title:
                 self.vip_welfare()
+            elif '听3首' in title or '听 3 首' in title or code == 'MRGSSVIPGQ':
+                self.taskInfo(title, '需App真实播放,跳过')
+            elif '分享' in title:
+                self.vip_share_task()
+            elif '云贝' in title or code == 'YBHXDL':
+                self.vip_browse_task(t)
             elif '调音' in title or '浏览' in title:
                 self.vip_browse_task(t)
             elif code == 'SZKJQDT' or '开机启动图' in title:
                 self.taskInfo(title, '需App手动操作,跳过')
             else:
                 self.taskInfo(title, '无法自动完成')
+
+    # 每日听3首VIP歌曲: 拉取播放 URL + 试听上报 + 充值卡听歌时长上报
+    def vip_listen_three(self):
+        detail = self.music.playlist_detail_v6('8402996200')
+        tracks = detail.get('playlist', {}).get('trackIds', [])
+        if not tracks:
+            self.taskInfo('每日听3首VIP', '获取歌单失败')
+            return
+        ids = random.sample([t['id'] for t in tracks], min(3, len(tracks)))
+        songs = self.music.songs_detail(ids).get('songs', [])
+        song_map = {s['id']: s for s in songs}
+        ok = 0
+        for sid in ids:
+            s = song_map.get(sid, {})
+            album_id = (s.get('al') or {}).get('id', 0)
+            duration = max((s.get('dt') or 180000) // 1000, 60)
+            url = ''
+            player = self.music.song_player_url_v1(sid)
+            if player.get('code') == 200 and player.get('data'):
+                url = (player['data'][0] or {}).get('url', '')
+            if url:
+                try:
+                    requests.get(url, timeout=15, stream=True).close()
+                except Exception:
+                    pass
+            self.taskInfo('每日听3首VIP', '播放{}秒'.format(duration))
+            time.sleep(duration)
+            try:
+                self.music.vip_refill_listen(sid, duration)
+            except Exception:
+                pass
+            r = self.music.trialsong_listen(sid, album_id, 31)
+            if r.get('code') == 200 and r.get('data'):
+                ok += 1
+        self.taskInfo('每日听3首VIP', '完成{}首'.format(ok))
+
+    # 分享单曲到站外: wxsession 优先, 失败兜底 copylink
+    def vip_share_task(self):
+        detail = self.music.playlist_detail_v6('8402996200')
+        tracks = detail.get('playlist', {}).get('trackIds', [])
+        if not tracks:
+            self.taskInfo('分享单曲到站外', '获取歌单失败')
+            return
+        sid = random.choice([t['id'] for t in tracks])
+        r = self.music.vip_share_song(sid, 'wxsession')
+        if r.get('code') == 200 and r.get('data'):
+            self.taskInfo('分享单曲到站外', '微信分享成功')
+            return
+        r2 = self.music.vip_share_song(sid, 'copylink')
+        if r2.get('code') == 200 and r2.get('data'):
+            self.taskInfo('分享单曲到站外', '复制链接分享成功')
+        else:
+            self.taskInfo('分享单曲到站外', self.errMsg(r))
 
     # 红心3首VIP单曲: 从热门 VIP 歌单随机取 3 首红心
     def vip_like_three(self):
@@ -900,7 +986,19 @@ class User(object):
             'webViewId': webview_id,
             'href': jump_url.replace('/', '\\/'),
             'newebkit': 1})
-        page_codes = ['music_vip_sound_effect_detail', 'sound_effect_detail']
+        component = qs.get('component', [''])[0]
+        page_codes = []
+        if component:
+            cleaned = component.replace('-', '_')
+            page_codes += ['music_vip_' + cleaned, cleaned,
+                           'music_vip_' + component, component]
+            if component.startswith('rn-'):
+                no_rn = component[3:]
+                no_rn_cleaned = no_rn.replace('-', '_')
+                page_codes += ['music_vip_' + no_rn_cleaned, no_rn_cleaned,
+                               'music_vip_' + no_rn, no_rn]
+        if not page_codes:
+            page_codes = ['music_vip_sound_effect_detail', 'sound_effect_detail']
         resource_types = ['vip_growth', task_business, '']
 
         def report(action_type, view_time_ms=0):

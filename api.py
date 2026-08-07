@@ -259,11 +259,38 @@ class NetEase(object):
         path = "/api/vipcenter/benefits/get"
         return self.request_eapi(path, params=dict(id=str(benefit_id)))
 
+    # 黑胶 VIP 成长中心日常任务列表 (分享单曲/浏览云贝中心/每日听3首VIP等)
+    def vip_progress_list(self):
+        path = "/weapi/middle/vip/mission/user/progress/list"
+        return self.request("POST", path)
+
+    # 播放 URL (v1, trialMode=31 为 VIP 试听场景)
+    def song_player_url_v1(self, song_id):
+        path = "/weapi/song/enhance/player/url/v1"
+        params = dict(ids=json.dumps([song_id]), level="standard",
+                      encodeType="aac", trialMode="31")
+        return self.request("POST", path, params)
+
+    # 充值卡听歌时长上报 (每日听3首VIP歌曲任务)
+    def vip_refill_listen(self, song_id, duration):
+        path = "/api/vipactivity/app/refill/card/listen/info"
+        params = dict(
+            bizExtend=json.dumps({"songId": str(song_id)}),
+            resourceId="{}_{}".format(song_id, int(time.time())),
+            incrAmount=int(duration))
+        return self.request_eapi(path, params, os="iOS")
+
+    # 分享单曲到站外 (EAPI trigger, wxsession 优先, copylink 兜底)
+    def vip_share_song(self, song_id, channel="wxsession"):
+        path = "/api/music/song/share/trigger"
+        params = dict(songId=str(song_id), channel=channel)
+        return self.request_eapi(path, params, os="iOS")
+
     # 上报中台页面浏览 (模拟 App WebView, 用于"查看AI调音大师"等浏览类任务)
     def vip_page_view_report(self, data, webkit_context=""):
         csrf_token = ""
         for cookie in self.session.cookies:
-            if cookie.name == "__csrf":
+            if cookie.name.strip() == "__csrf":
                 csrf_token = cookie.value
                 break
         url = "https://interface.music.163.com/weapi/middle/page/view/report"
