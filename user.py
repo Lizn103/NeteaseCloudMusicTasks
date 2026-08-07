@@ -47,6 +47,7 @@ class User(object):
             raise Exception('请填写账号密码或cookie')
         self.music = self.login_check(user_config['username'], user_config['password'], user_config['cookie'], user_config.get(
             'countrycode', ''), user_config['X-Real-IP'])
+        self.cookie = user_config['cookie']
         if self.music.uid != 0:
             self.isLogined = True
             self.user_setting = user_setting
@@ -724,6 +725,9 @@ class User(object):
             self.taskInfo('黑胶乐签', self.errMsg(sign_resp))
         time.sleep(2)
 
+        # 黑胶每日附加任务 (红心3首VIP/免费领福利/查看AI调音大师等)
+        self.vip_daily_tasks()
+
         resp = self.music.vip_task_newlist()
         items = []
         tasks = self.user_setting["vip_task"]
@@ -758,12 +762,14 @@ class User(object):
 
         if unGetAllScore == 0:
             self.taskInfo('没有可领取的成长值')
+            self._unlike_vip_songs()
             self.finishTask()
             return
 
         reward_resp = self.music.vip_reward_getall()
         if reward_resp['code'] != 200:
             self.taskInfo('成长值领取失败', self.errMsg(reward_resp))
+            self._unlike_vip_songs()
             self.finishTask()
             return
 
@@ -791,7 +797,132 @@ class User(object):
 
         if unGetAllScore > scores:
             self.taskInfo('未知', '成长值+' + str(unGetAllScore - scores))
+        self._unlike_vip_songs()
         self.finishTask()
+
+    # 黑胶每日附加任务 (EAPI task/list, 参考 ncmm executeSingleVipTask)
+    def vip_daily_tasks(self):
+        resp = self.music.vip_task_list(getattr(self, 'cookie', ''))
+        if resp.get('code') != 200:
+            self.taskInfo('黑胶每日任务', '获取任务列表失败')
+            return
+        for t in resp.get('data', []):
+            title = t.get('mainTitle') or ''
+            status = t.get('status')
+            code = t.get('missionCode') or ''
+            if status != 10:
+                continue
+            if code == 'HXSSG' or '红心3首' in title:
+                self.vip_like_three()
+            elif code == 'FLQ' or '领福利' in title:
+                self.vip_welfare()
+            elif '调音' in title or '浏览' in title:
+                self.vip_browse_task(t)
+            elif code == 'SZKJQDT' or '开机启动图' in title:
+                self.taskInfo(title, '需App手动操作,跳过')
+            else:
+                self.taskInfo(title, '无法自动完成')
+
+    # 红心3首VIP单曲: 从热门 VIP 歌单随机取 3 首红心
+    def vip_like_three(self):
+        detail = self.music.playlist_detail_v6('8402996200')
+        tracks = detail.get('playlist', {}).get('trackIds', [])
+        if not tracks:
+            self.taskInfo('红心3首VIP', '获取歌单失败')
+            return
+        ids = random.sample([t['id'] for t in tracks], min(3, len(tracks)))
+        ok = 0
+        liked = []
+        for sid in ids:
+            resp = self.music.vip_song_like(sid)
+            if resp.get('code') == 200:
+                ok += 1
+                liked.append(sid)
+            time.sleep(random.randint(3, 6))
+        self.liked_vip_song_ids = liked
+        if ok > 0:
+            self.taskInfo('红心3首VIP', '红心成功{}首'.format(ok))
+        else:
+            self.taskInfo('红心3首VIP', '红心失败')
+
+    # 领取成长值后取消临时红心, 恢复用户歌单
+    def _unlike_vip_songs(self):
+        ids = getattr(self, 'liked_vip_song_ids', None)
+        if not ids:
+            return
+        ok = 0
+        for sid in ids:
+            resp = self.music.vip_song_like(sid, like="false")
+            if resp.get('code') == 200:
+                ok += 1
+            time.sleep(random.randint(1, 3))
+        self.liked_vip_song_ids = []
+        self.taskInfo('取消红心', '已取消{}首'.format(ok))
+
+    # 免费领福利: 领取一张未领取的商家福利券
+    def vip_welfare(self):
+        resp = self.music.vip_benefit_list()
+        if resp.get('code') != 200:
+            self.taskInfo('免费领福利', '获取福利列表失败')
+            return
+        target = None
+        for b in resp.get('data', []):
+            if not b.get('benefitGet') and b.get('id'):
+                target = b
+                break
+        if not target:
+            self.taskInfo('免费领福利', '福利券均已领取')
+            return
+        r = self.music.vip_benefit_get(target['id'])
+        if r.get('code') == 200:
+            self.taskInfo('免费领福利', '已领取[' + str(target.get('name')) + ']')
+        else:
+            self.taskInfo('免费领福利', self.errMsg(r))
+
+    # 浏览类任务 (查看AI调音大师): 模拟 App WebView 浏览上报
+    def vip_browse_task(self, task):
+        import urllib.parse
+        import json
+        jump_url = task.get('jumpUrl') or ''
+        if not jump_url or 'view_task_id' not in jump_url:
+            self.taskInfo(task.get('mainTitle'), '缺少跳转参数')
+            return
+        qs = urllib.parse.parse_qs(urllib.parse.urlparse(jump_url).query)
+        task_id = qs.get('view_task_id', [''])[0]
+        task_business = qs.get('view_task_business', ['music.vip_growth'])[0]
+        view_time = int(qs.get('view_time', ['15'])[0])
+        if not task_id:
+            self.taskInfo(task.get('mainTitle'), '缺少view_task_id')
+            return
+
+        webview_id = str(random.randint(1000000000, 9999999999))
+        webkit = json.dumps({
+            'webViewId': webview_id,
+            'href': jump_url.replace('/', '\\/'),
+            'newebkit': 1})
+        page_codes = ['music_vip_sound_effect_detail', 'sound_effect_detail']
+        resource_types = ['vip_growth', task_business, '']
+
+        def report(action_type, view_time_ms=0):
+            for pc in page_codes:
+                for rt in resource_types:
+                    self.music.vip_page_view_report({
+                        'actionType': action_type,
+                        'time': int(time.time() * 1000),
+                        'taskId': task_id,
+                        'taskType': 200,
+                        'viewTime': view_time_ms,
+                        'jumpUrl': jump_url,
+                        'taskBusiness': task_business,
+                        'resourceType': rt,
+                        'pageCode': pc,
+                    }, webkit)
+
+        report('viewStart')
+        self.taskInfo(task.get('mainTitle'), '模拟浏览{}秒'.format(view_time))
+        time.sleep(view_time + 3)
+        report('viewEnd', (view_time + 3) * 1000)
+        self.taskInfo(task.get('mainTitle'), '浏览上报完成')
 
     def startTask(self):
         self.userInfo()

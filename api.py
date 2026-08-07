@@ -163,15 +163,25 @@ class NetEase(object):
         return self.request("POST", path, params)
 
     # 新版 eapi 请求 (网易云 2025+ 移动端接口), 参考 https://github.com/3899/ncmm
-    def request_eapi(self, path, params={}, host="https://interface3.music.163.com"):
-        endpoint = host + "/eapi" + path
+    # cookie 参数传原始 cookie 字符串时, 使用该 cookie 直接请求 (避免 session 附加 cookie 改变接口返回结构)
+    def request_eapi(self, path, params={}, host="https://interface3.music.163.com", os="android", cookie=""):
+        endpoint = host + "/eapi" + (path[4:] if path.startswith("/api/") else path)
         csrf_token = ""
         music_u = ""
-        for cookie in self.session.cookies:
-            if cookie.name == "__csrf":
-                csrf_token = cookie.value
-            if cookie.name == "MUSIC_U":
-                music_u = cookie.value
+        if cookie:
+            for piece in cookie.split(";"):
+                kv = piece.strip().split("=", 1)
+                if len(kv) == 2:
+                    if kv[0].strip() == "__csrf":
+                        csrf_token = kv[1].strip()
+                    if kv[0].strip() == "MUSIC_U":
+                        music_u = kv[1].strip()
+        else:
+            for ck in self.session.cookies:
+                if ck.name.strip() == "__csrf":
+                    csrf_token = ck.value
+                if ck.name.strip() == "MUSIC_U":
+                    music_u = ck.value
         header = {
             "osver": "",
             "deviceId": "",
@@ -181,7 +191,7 @@ class NetEase(object):
             "buildver": str(int(time.time())),
             "resolution": "1920x1080",
             "__csrf": csrf_token,
-            "os": "android",
+            "os": os,
             "channel": "",
             "requestId": "{}_{:04d}".format(
                 int(time.time() * 1000), random.randint(0, 9999)),
@@ -190,9 +200,17 @@ class NetEase(object):
             header["MUSIC_U"] = music_u
         params = dict(params)
         params["header"] = json.dumps(header)
+        if "e_r" not in params:
+            params["e_r"] = "true"
         data = eapi_encrypt(path, params)
         try:
-            resp = self._raw_request("POST", endpoint, data)
+            if cookie:
+                resp = requests.post(endpoint, data=data, headers={
+                    **self.header, "Cookie": cookie,
+                    "Content-Type": "application/x-www-form-urlencoded"},
+                    timeout=DEFAULT_TIMEOUT)
+            else:
+                resp = self._raw_request("POST", endpoint, data)
             raw = resp.content
             decrypted = eapi_decrypt(raw)
             return json.loads(decrypted)
@@ -208,6 +226,64 @@ class NetEase(object):
         path = "/api/song/like"
         params = dict(trackId=str(song_id), userid=str(user_id), like=True)
         return self.request_eapi(path, params, host="https://interface.music.163.com")
+
+    # 红心歌曲 (ncmm 参数格式, 用于黑胶 VIP 任务"红心3首VIP单曲"; like="false" 取消红心)
+    def vip_song_like(self, song_id, like="true"):
+        path = "/api/song/like"
+        params = dict(trackId=str(song_id), like=like, time="3", checkToken="")
+        return self.request_eapi(path, params, host="https://interface.music.163.com")
+
+    # 歌单详情 (v6 明文接口, 可获取完整 trackIds, 参考 ncmm PlaylistDetail)
+    def playlist_detail_v6(self, playlist_id):
+        url = "https://music.163.com/api/v6/playlist/detail"
+        try:
+            resp = self.session.get(url, params={"id": playlist_id, "n": "100000", "s": "8"}, timeout=DEFAULT_TIMEOUT)
+            return resp.json()
+        except requests.exceptions.RequestException as e:
+            print(e)
+            return {"code": -1}
+
+    # 黑胶 VIP 任务列表 (每日任务: 红心3首/免费领福利/设置开机启动图等)
+    def vip_task_list(self, cookie=""):
+        path = "/api/vip-center-bff/task/list"
+        params = dict(verifyId=1, isNew=1)
+        return self.request_eapi(path, params, os="iOS", cookie=cookie)
+
+    # 商家福利券列表 (category=1291816 为常驻商家福利)
+    def vip_benefit_list(self, category="1291816"):
+        path = "/api/vipnewcenter/app/benefitcenter/benefits/category/list"
+        return self.request_eapi(path, params=dict(category=category))
+
+    # 领取商家福利券
+    def vip_benefit_get(self, benefit_id):
+        path = "/api/vipcenter/benefits/get"
+        return self.request_eapi(path, params=dict(id=str(benefit_id)))
+
+    # 上报中台页面浏览 (模拟 App WebView, 用于"查看AI调音大师"等浏览类任务)
+    def vip_page_view_report(self, data, webkit_context=""):
+        csrf_token = ""
+        for cookie in self.session.cookies:
+            if cookie.name == "__csrf":
+                csrf_token = cookie.value
+                break
+        url = "https://interface.music.163.com/weapi/middle/page/view/report"
+        params = dict(data=json.dumps(data), csrf_token=csrf_token)
+        params = encrypted_request(params)
+        headers = {
+            "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_6_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 CloudMusic/0.1.1 NeteaseMusic/9.4.95",
+            "Host": "interface.music.163.com",
+            "Origin": "https://music.163.com",
+            "Referer": "https://music.163.com/",
+            "Content-Type": "application/x-www-form-urlencoded",
+        }
+        if webkit_context:
+            headers["netease_webkit_context"] = webkit_context
+        try:
+            resp = self.session.post(url, data=params, headers=headers, timeout=DEFAULT_TIMEOUT)
+            return resp.json()
+        except requests.exceptions.RequestException as e:
+            print(e)
+            return {"code": -1}
 
     # 云贝任务点击上报 (浏览会员中心等)
     def yunbei_click_task(self, task_id, sub_action="", type_="", check_token=""):
@@ -464,11 +540,6 @@ class NetEase(object):
 
     def vip_level(self):
         path = "/weapi/music-vip-membership/client/vip/info"
-        return self.request("POST", path)
-
-    # vip任务列表
-    def vip_task_list(self):
-        path = "/weapi/vipnewcenter/app/level/task/list"
         return self.request("POST", path)
 
     # 领取会员成长值
